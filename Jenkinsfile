@@ -40,7 +40,7 @@ pipeline {
     booleanParam(name: 'saucelab_test', defaultValue: "true", description: "Enable run a Sauce lab test")
     booleanParam(name: 'bench_ci', defaultValue: true, description: 'Enable benchmarks')
     booleanParam(name: 'release', defaultValue: false, description: 'Release. If so, all the other parameters will be ignored when releasing from main.')
-    string(name: 'stack_version', defaultValue: '7.17.0', description: "What's the Stack Version to be used for the load testing?")
+    string(name: 'stack_version', defaultValue: '8.1.2', description: "What's the Stack Version to be used for the load testing?")
   }
   stages {
     stage('Initializing'){
@@ -118,30 +118,29 @@ pipeline {
             }
           }
           matrix {
-            agent { label 'linux && immutable' }
             axes {
-                axis {
-                  name 'ELASTIC_STACK_VERSION'
-                  // The below line is part of the bump release automation
-                  // if you change anything please modifies the file
-                  // .ci/bump-stack-release-version.sh
-                  values '8.0.0-SNAPSHOT', '7.16.0'
-                }
-                axis {
-                  name 'SCOPE'
-                  values (
-                    '@elastic/apm-rum',
-                    '@elastic/apm-rum-core',
-                    '@elastic/apm-rum-react',
-                    '@elastic/apm-rum-angular',
-                    '@elastic/apm-rum-vue',
-                  )
-                }
+              axis {
+                name 'ELASTIC_STACK_VERSION'
+                // The below line is part of the bump release automation
+                // if you change anything please modifies the file
+                // .ci/bump-stack-release-version.sh
+                values '8.0.0-SNAPSHOT', '7.16.0'
+              }
+              axis {
+                name 'SCOPE'
+                values (
+                  '@elastic/apm-rum',
+                  '@elastic/apm-rum-core',
+                  '@elastic/apm-rum-react',
+                  '@elastic/apm-rum-angular',
+                  '@elastic/apm-rum-vue',
+                )
+              }
             }
             stages {
               stage('Scope Test') {
                 steps {
-                  runTest(stack: env.ELASTIC_STACK_VERSION, scope: env.SCOPE)
+                  runTest(stack: env.ELASTIC_STACK_VERSION, scope: env.SCOPE, allocateNode: true)
                 }
               }
             }
@@ -483,16 +482,15 @@ def runScript(Map args = [:]){
       "STACK_VERSION=${stack}",
       "SCOPE=${scope}",
       "APM_SERVER_URL=http://apm-server:8200",
+      "KIBANA_URL=http://kibana:5601",
       "APM_SERVER_PORT=8200",
       "GOAL=${goal}"]) {
-      retry(2) {
-        sleep randomNumber(min: 5, max: 10)
+      retryWithSleep(retries: 2, seconds: 5, sleepFirst: true) {
         sh(label: 'Pull and build docker infra', script: '.ci/scripts/pull_and_build.sh')
       }
       try {
         // Another retry in case there are any environmental issues
-        retry(3) {
-          sleep randomNumber(min: 5, max: 10)
+        retryWithSleep(retries: 3, seconds: 5, sleepFirst: true) {
           if(env.MODE == 'saucelabs'){
             withSaucelabsEnv(){
               sh(label: "Run tests: Elastic Stack ${stack} - ${scope} - ${env.MODE}", script: '.ci/scripts/test.sh')
@@ -501,8 +499,6 @@ def runScript(Map args = [:]){
             sh(label: "Run tests: Elastic Stack ${stack} - ${scope} - ${env.MODE}", script: '.ci/scripts/test.sh')
           }
         }
-      } catch(e) {
-        throw e
       } finally {
         dockerLogs(step: "${label}-${stack}", failNever: true)
       }
@@ -585,15 +581,18 @@ def runAllScopes(Map args = [:]) {
 def runTest(Map args = [:]){
   def stack = args.stack
   def scope = args.scope
+  def allocateNode = args.get('allocateNode', false)
   def mode = env.MODE == 'none' ? 'Puppeteer' : env.MODE
   def stackVersion = (stack == '7.x') ? artifactsApi(action: '7.x-version') : stack
+
   withGithubNotify(context: "Test ${scope} - ${stack} - ${mode}", tab: 'tests') {
-    runScript(
-      label: "${scope}",
-      stack: "${stackVersion}",
-      scope: "${scope}",
-      goal: 'test'
-    )
+    if (allocateNode) {
+      withNode(labels: 'linux && immutable', sleepMax: 5, forceWorspace: true, forceWorker: true){
+        runScript(label: "${scope}", stack: "${stackVersion}", scope: "${scope}", goal: 'test')
+      }
+    } else {
+      runScript(label: "${scope}", stack: "${stackVersion}", scope: "${scope}", goal: 'test')
+    }
   }
 }
 
